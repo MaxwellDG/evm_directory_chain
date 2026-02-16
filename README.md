@@ -56,9 +56,8 @@ After setting the variable, you can run the deployment with the Sepolia network:
 npx hardhat ignition deploy --network sepolia ignition/modules/Counter.ts
 ```
 
-```Contract Addresses
+Contract Addresses
 ### Mainnet
-
+    N/A 
 ### Sepolia
     Counter.sol -> 0x9A73e4f6158f2d1ea463824B1AC66Ea4211Ca603
-```
