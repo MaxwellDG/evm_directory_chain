@@ -1,63 +1,137 @@
-# Sample Hardhat 3 Beta Project (`mocha` and `ethers`)
+# evm_directory_chain
 
-This project showcases a Hardhat 3 Beta project using `mocha` for tests and the `ethers` library for Ethereum interactions.
+Smart contracts for the EVM Directory project. The main contract, `Escrow`, holds ETH for buyer/seller
+offers on **Ethereum Sepolia** and records each offer's USD value from the
+[Chainlink ETH/USD price feed](https://docs.chain.link/data-feeds/price-feeds/addresses). Its events are
+meant to be indexed by [`evm_directory_subgraph`](https://github.com/MaxwellDG/evm_directory_subgraph) and
+served by [`evm_directory_api`](https://github.com/MaxwellDG/evm_directory_api) to report how often escrow
+deals succeed or fail.
 
-To learn more about the Hardhat 3 Beta, please visit the [Getting Started guide](https://hardhat.org/docs/getting-started#getting-started-with-hardhat-3). To share your feedback, join our [Hardhat 3 Beta](https://hardhat.org/hardhat3-beta-telegram-group) Telegram group or [open an issue](https://github.com/NomicFoundation/hardhat/issues/new) in our GitHub issue tracker.
+This project targets Sepolia only. There is no mainnet deployment.
 
-## Project Overview
+Built with [Hardhat 3](https://hardhat.org/docs/getting-started) (mocha + ethers, Ignition) and Solidity 0.8.28.
 
-This example project includes:
+## Layout
 
-- A simple Hardhat configuration file.
-- Foundry-compatible Solidity unit tests.
-- TypeScript integration tests using `mocha` and ethers.js
-- Examples demonstrating how to connect to different types of networks, including locally simulating OP mainnet.
+| Path                                       | What it is                                                     |
+| ------------------------------------------ | -------------------------------------------------------------- |
+| `contracts/Escrow.sol`                     | The escrow contract                                            |
+| `contracts/interfaces/AggregatorV3Interface.sol` | Minimal copy of Chainlink's feed interface               |
+| `contracts/mocks/MockV3Aggregator.sol`     | Mock feed for tests and local deployments only                 |
+| `contracts/Escrow.t.sol`                   | Foundry-style Solidity tests                                   |
+| `test/Escrow.ts`                           | mocha + ethers tests                                           |
+| `ignition/modules/Escrow.ts`               | Deploys `Escrow` against a real feed (Sepolia)                 |
+| `ignition/modules/EscrowLocal.ts`          | Deploys a mock feed + `Escrow` for local chains                |
+| `ignition/parameters/sepolia.json`         | Sepolia deployment parameters                                  |
 
-## Usage
+## How the escrow works
 
-### Running Tests
+Each offer has a seller, a buyer, an amount in wei, and a USD value (18 decimals) taken from the price feed
+when the offer is created. The feed answer must be positive and no older than `maxPriceAge` seconds, or the
+call reverts with `StalePrice` / `InvalidPrice`. The recorded USD value never changes afterwards.
 
-To run all the tests in the project, execute the following command:
+| Step | Function | Who | ETH |
+| ---- | -------- | --- | --- |
+| List an item for sale | `createOffer(Side.Sell, counterparty, amount)` | seller | none |
+| Offer to buy | `createOffer(Side.Buy, counterparty, amount)` | buyer | deposits `amount` |
+| Accept | `acceptOffer(offerId)` | the other party (`counterparty`, or anyone if it was `address(0)`) | buyer sends `amount` when accepting a listing |
+| Cancel | `cancelOffer(offerId)` | creator, only while still open | a buy offer's deposit is returned |
+| Complete the sale | `completeSale(offerId)` | buyer or arbiter | escrowed ETH goes to the seller |
+| Refund | `refund(offerId)` | seller or arbiter | escrowed ETH goes back to the buyer |
 
-```shell
-npx hardhat test
+Statuses: `Open` → `Accepted` → `Completed` or `Refunded`; `Open` → `Cancelled`.
+
+The `arbiter` is an optional dispute resolver set at deployment (`address(0)` disables it). Without an
+arbiter, an accepted offer can only be settled by the buyer releasing funds or the seller refunding.
+
+### Events
+
+```solidity
+event OfferCreated(uint256 indexed offerId, address indexed seller, address indexed buyer, address creator, Side side, uint256 amount, uint256 usdValue);
+event OfferAccepted(uint256 indexed offerId, address indexed seller, address indexed buyer, uint256 amount);
+event OfferCancelled(uint256 indexed offerId, address indexed cancelledBy);
+event SaleExecuted(uint256 indexed offerId, address indexed seller, address indexed buyer, uint256 amount, uint256 usdValue);
+event Refunded(uint256 indexed offerId, address indexed buyer, address indexed refundedBy, uint256 amount);
 ```
 
-You can also selectively run the Solidity or `mocha` tests:
+In `OfferCreated`, `buyer` (for a sell listing) or `seller` (for a buy offer) is `address(0)` when the offer
+is open to anyone; the accepting address appears in `OfferAccepted`.
+
+### Safety
+
+- Checks-effects-interactions plus a `nonReentrant` guard on every state-changing function.
+- Custom errors (`Unauthorized`, `InvalidStatus`, `IncorrectPayment`, `StalePrice`, ...).
+- ETH is sent with `call`; if the recipient reverts, the whole settlement reverts and the funds stay in escrow.
+
+## Setup
+
+Requires Node.js 22 or later (Hardhat 3).
 
 ```shell
-npx hardhat test solidity
-npx hardhat test mocha
+pnpm install
 ```
 
-### Make a deployment to Sepolia
-
-This project includes an example Ignition module to deploy the contract. You can deploy this module to a locally simulated chain or to Sepolia.
-
-To run the deployment to a local chain:
+## Test
 
 ```shell
-npx hardhat ignition deploy ignition/modules/Counter.ts
+npx hardhat test            # everything
+npx hardhat test solidity   # contracts/Escrow.t.sol
+npx hardhat test mocha      # test/Escrow.ts
 ```
 
-To run the deployment to Sepolia, you need an account with funds to send the transaction. The provided Hardhat configuration includes a Configuration Variable called `SEPOLIA_PRIVATE_KEY`, which you can use to set the private key of the account you want to use.
+## Deploy
 
-You can set the `SEPOLIA_PRIVATE_KEY` variable using the `hardhat-keystore` plugin or by setting it as an environment variable.
-
-To set the `SEPOLIA_PRIVATE_KEY` config variable using `hardhat-keystore`:
+### Local
 
 ```shell
-npx hardhat keystore set SEPOLIA_PRIVATE_KEY
+npx hardhat ignition deploy ignition/modules/EscrowLocal.ts
 ```
 
-After setting the variable, you can run the deployment with the Sepolia network:
-
-```shell
-npx hardhat ignition deploy --network sepolia ignition/modules/Counter.ts
-```
-
-Contract Addresses
-### Mainnet
-    N/A 
 ### Sepolia
-    Counter.sol -> 0x9A73e4f6158f2d1ea463824B1AC66Ea4211Ca603
+
+The Sepolia deployment uses the Chainlink ETH/USD feed proxy
+`0x694AA1769357215DE4FAC081bf1f309aDC325306`
+(from [docs.chain.link](https://docs.chain.link/data-feeds/using-data-feeds)). Check
+[data.chain.link](https://data.chain.link/feeds/ethereum/testnet-sepolia/eth-usd) for the feed's current
+heartbeat and adjust `maxPriceAge` in `ignition/parameters/sepolia.json` if needed (default: 3 hours).
+
+`hardhat.config.ts` reads three configuration variables:
+
+| Variable | Used for |
+| -------- | -------- |
+| `SEPOLIA_RPC_URL` | Sepolia RPC endpoint |
+| `SEPOLIA_PRIVATE_KEY` | Deployer account (needs Sepolia ETH) |
+| `ETHERSCAN_API_KEY` | Contract verification |
+
+Set them with the keystore (or as environment variables):
+
+```shell
+npx hardhat keystore set SEPOLIA_RPC_URL
+npx hardhat keystore set SEPOLIA_PRIVATE_KEY
+npx hardhat keystore set ETHERSCAN_API_KEY
+```
+
+Deploy (and verify on Etherscan in the same step):
+
+```shell
+npx hardhat ignition deploy ignition/modules/Escrow.ts \
+  --network sepolia \
+  --parameters ignition/parameters/sepolia.json \
+  --build-profile production \
+  --verify
+```
+
+Or verify an existing deployment separately:
+
+```shell
+npx hardhat verify --network sepolia <ESCROW_ADDRESS> \
+  0x694AA1769357215DE4FAC081bf1f309aDC325306 10800 0x0000000000000000000000000000000000000000
+```
+
+After deploying, point `evm_directory_subgraph` at the new `Escrow` address and its deployment block.
+
+## Contract addresses
+
+### Sepolia
+
+Not deployed yet.
