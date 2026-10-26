@@ -2,6 +2,7 @@
     "EscrowModule": {
         "priceFeed": "0x694AA1769357215DE4FAC081bf1f309aDC325306",
         "maxPriceAge": 10800,
-        "arbiter": "0x0000000000000000000000000000000000000000"
+        "arbiter": "0x0000000000000000000000000000000000000000",
+        "settlementPeriod": 604800
     }
 }

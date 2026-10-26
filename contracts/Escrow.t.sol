@@ -34,6 +34,7 @@ contract EscrowTest is Test {
     uint8 constant DECIMALS = 8;
     int256 constant PRICE = 2_000e8; // $2,000 / ETH
     uint256 constant MAX_AGE = 3_600;
+    uint256 constant SETTLE = 7 days;
 
     MockV3Aggregator feed;
     Escrow escrow;
@@ -58,11 +59,12 @@ contract EscrowTest is Test {
         uint256 indexed offerId, address indexed seller, address indexed buyer, uint256 amount, uint256 usdValue
     );
     event Refunded(uint256 indexed offerId, address indexed buyer, address indexed refundedBy, uint256 amount);
+    event OfferExpired(uint256 indexed offerId, address indexed buyer, address indexed expiredBy, uint256 amount);
 
     function setUp() public {
         vm.warp(1_700_000_000);
         feed = new MockV3Aggregator(DECIMALS, PRICE);
-        escrow = new Escrow(address(feed), MAX_AGE, arbiter);
+        escrow = new Escrow(address(feed), MAX_AGE, arbiter, SETTLE);
         vm.deal(buyer, 100 ether);
         vm.deal(seller, 100 ether);
         vm.deal(stranger, 100 ether);
@@ -85,7 +87,7 @@ contract EscrowTest is Test {
 
     function test_ConstructorRejectsZeroFeed() public {
         vm.expectRevert(Escrow.InvalidPriceFeed.selector);
-        new Escrow(address(0), MAX_AGE, arbiter);
+        new Escrow(address(0), MAX_AGE, arbiter, SETTLE);
     }
 
     function test_UsdValue() public view {
@@ -277,7 +279,7 @@ contract EscrowTest is Test {
     }
 
     function test_NoArbiterMeansZeroAddressHasNoPower() public {
-        Escrow noArb = new Escrow(address(feed), MAX_AGE, address(0));
+        Escrow noArb = new Escrow(address(feed), MAX_AGE, address(0), SETTLE);
         vm.prank(seller);
         uint256 id = noArb.createOffer(Escrow.Side.Sell, address(0), 1 ether);
         vm.prank(buyer);
@@ -332,6 +334,131 @@ contract EscrowTest is Test {
 
         assertEq(address(escrow).balance, 1 ether);
         assertEq(uint8(escrow.getOffer(id).status), uint8(Escrow.Status.Accepted));
+    }
+
+    // ------------------------------------------------------------------ expiry
+
+    function _acceptedListing(uint256 amount) internal returns (uint256 id) {
+        vm.prank(seller);
+        id = escrow.createOffer(Escrow.Side.Sell, address(0), amount);
+        vm.deal(buyer, amount);
+        vm.prank(buyer);
+        escrow.acceptOffer{value: amount}(id);
+    }
+
+    function test_ConstructorRejectsZeroSettlementPeriod() public {
+        vm.expectRevert(Escrow.InvalidSettlementPeriod.selector);
+        new Escrow(address(feed), MAX_AGE, arbiter, 0);
+    }
+
+    function test_AcceptRecordsAcceptedAt() public {
+        uint256 id = _acceptedListing(1 ether);
+        assertEq(escrow.getOffer(id).acceptedAt, block.timestamp);
+    }
+
+    function test_RevertWhen_ExpireDuringSettlementPeriod() public {
+        uint256 id = _acceptedListing(1 ether);
+        vm.warp(block.timestamp + SETTLE - 1);
+        assertFalse(escrow.isExpired(id));
+        vm.expectRevert(
+            abi.encodeWithSelector(Escrow.SettlementPeriodActive.selector, id, block.timestamp + 1)
+        );
+        escrow.expireOffer(id);
+    }
+
+    function test_AnyoneExpiresAfterSettlementPeriod() public {
+        uint256 id = _acceptedListing(1 ether);
+        uint256 before = buyer.balance;
+        vm.warp(block.timestamp + SETTLE);
+        assertTrue(escrow.isExpired(id));
+
+        vm.expectEmit(address(escrow));
+        emit OfferExpired(id, buyer, stranger, 1 ether);
+        vm.prank(stranger);
+        escrow.expireOffer(id);
+
+        assertEq(buyer.balance, before + 1 ether);
+        assertEq(address(escrow).balance, 0);
+        assertEq(uint8(escrow.getOffer(id).status), uint8(Escrow.Status.Expired));
+        assertFalse(escrow.isExpired(id));
+    }
+
+    function test_RevertWhen_ExpireSettledOffer() public {
+        uint256 id = _acceptedListing(1 ether);
+        vm.prank(buyer);
+        escrow.completeSale(id);
+        vm.warp(block.timestamp + SETTLE);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.InvalidStatus.selector, id, Escrow.Status.Completed));
+        escrow.expireOffer(id);
+    }
+
+    function test_RevertWhen_ExpireOpenOffer() public {
+        vm.prank(seller);
+        uint256 id = escrow.createOffer(Escrow.Side.Sell, address(0), 1 ether);
+        vm.warp(block.timestamp + SETTLE);
+        assertFalse(escrow.isExpired(id));
+        vm.expectRevert(abi.encodeWithSelector(Escrow.InvalidStatus.selector, id, Escrow.Status.Open));
+        escrow.expireOffer(id);
+    }
+
+    // ------------------------------------------------------------------ automation
+
+    function test_CheckUpkeepFalseWhenNothingExpired() public {
+        _acceptedListing(1 ether);
+        (bool needed, bytes memory data) = escrow.checkUpkeep("");
+        assertFalse(needed);
+        assertEq(abi.decode(data, (uint256[])).length, 0);
+    }
+
+    function test_UpkeepExpiresOnlyExpiredOffers() public {
+        uint256 a = _acceptedListing(1 ether);
+        vm.warp(block.timestamp + 1 days);
+        feed.updateAnswer(PRICE); // keep the price fresh
+        uint256 b = _acceptedListing(2 ether);
+        vm.prank(seller);
+        escrow.createOffer(Escrow.Side.Sell, address(0), 1 ether); // open, never expires
+        vm.warp(block.timestamp + SETTLE - 1 days); // only `a` has expired
+
+        (bool needed, bytes memory data) = escrow.checkUpkeep("");
+        assertTrue(needed);
+        uint256[] memory ids = abi.decode(data, (uint256[]));
+        assertEq(ids.length, 1);
+        assertEq(ids[0], a);
+
+        vm.prank(stranger);
+        escrow.performUpkeep(data);
+        assertEq(uint8(escrow.getOffer(a).status), uint8(Escrow.Status.Expired));
+        assertEq(uint8(escrow.getOffer(b).status), uint8(Escrow.Status.Accepted));
+
+        // Replaying the same performData is a no-op.
+        escrow.performUpkeep(data);
+        (needed,) = escrow.checkUpkeep("");
+        assertFalse(needed);
+    }
+
+    function test_PerformUpkeepSkipsNonExpiredIds() public {
+        uint256 a = _acceptedListing(1 ether);
+        uint256[] memory ids = new uint256[](2);
+        ids[0] = a;
+        ids[1] = 999;
+        escrow.performUpkeep(abi.encode(ids));
+        assertEq(uint8(escrow.getOffer(a).status), uint8(Escrow.Status.Accepted));
+    }
+
+    function test_CheckUpkeepRespectsStartIdAndBatchLimit() public {
+        uint256 total = escrow.MAX_UPKEEP_BATCH() + 5;
+        for (uint256 i; i < total; ++i) _acceptedListing(1 ether);
+        vm.warp(block.timestamp + SETTLE);
+
+        (, bytes memory data) = escrow.checkUpkeep("");
+        uint256[] memory ids = abi.decode(data, (uint256[]));
+        assertEq(ids.length, escrow.MAX_UPKEEP_BATCH());
+        assertEq(ids[0], 1);
+
+        (, data) = escrow.checkUpkeep(abi.encode(uint256(21)));
+        ids = abi.decode(data, (uint256[]));
+        assertEq(ids.length, 5);
+        assertEq(ids[0], 21);
     }
 
     // ------------------------------------------------------------------ fuzz
