@@ -5,11 +5,12 @@ const { ethers } = await network.connect()
 
 const PRICE = 2_000n * 10n ** 8n // $2,000 with 8 decimals
 const MAX_AGE = 3_600n
+const SETTLE = 7n * 24n * 3_600n
 
 async function deploy() {
     const [seller, buyer, arbiter, stranger] = await ethers.getSigners()
     const feed = await ethers.deployContract("MockV3Aggregator", [8, PRICE])
-    const escrow = await ethers.deployContract("Escrow", [await feed.getAddress(), MAX_AGE, arbiter.address])
+    const escrow = await ethers.deployContract("Escrow", [await feed.getAddress(), MAX_AGE, arbiter.address, SETTLE])
     return { feed, escrow, seller, buyer, arbiter, stranger }
 }
 

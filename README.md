@@ -38,8 +38,12 @@ call reverts with `StalePrice` / `InvalidPrice`. The recorded USD value never ch
 | Cancel | `cancelOffer(offerId)` | creator, only while still open | a buy offer's deposit is returned |
 | Complete the sale | `completeSale(offerId)` | buyer or arbiter | escrowed ETH goes to the seller |
 | Refund | `refund(offerId)` | seller or arbiter | escrowed ETH goes back to the buyer |
+| Expire | `expireOffer(offerId)` | anyone, once `settlementPeriod` has passed since acceptance | escrowed ETH goes back to the buyer |
 
-Statuses: `Open` → `Accepted` → `Completed` or `Refunded`; `Open` → `Cancelled`.
+Statuses: `Open` → `Accepted` → `Completed`, `Refunded` or `Expired`; `Open` → `Cancelled`.
+
+`settlementPeriod` (constructor argument, default 7 days in the Ignition modules) guarantees escrowed ETH
+is never stuck: if an accepted offer is not settled in time, anyone can expire it and refund the buyer.
 
 The `arbiter` is an optional dispute resolver set at deployment (`address(0)` disables it). Without an
 arbiter, an accepted offer can only be settled by the buyer releasing funds or the seller refunding.
@@ -52,6 +56,7 @@ event OfferAccepted(uint256 indexed offerId, address indexed seller, address ind
 event OfferCancelled(uint256 indexed offerId, address indexed cancelledBy);
 event SaleExecuted(uint256 indexed offerId, address indexed seller, address indexed buyer, uint256 amount, uint256 usdValue);
 event Refunded(uint256 indexed offerId, address indexed buyer, address indexed refundedBy, uint256 amount);
+event OfferExpired(uint256 indexed offerId, address indexed buyer, address indexed expiredBy, uint256 amount);
 ```
 
 In `OfferCreated`, `buyer` (for a sell listing) or `seller` (for a buy offer) is `address(0)` when the offer
@@ -125,7 +130,7 @@ Or verify an existing deployment separately:
 
 ```shell
 npx hardhat verify --network sepolia <ESCROW_ADDRESS> \
-  0x694AA1769357215DE4FAC081bf1f309aDC325306 10800 0x0000000000000000000000000000000000000000
+  0x694AA1769357215DE4FAC081bf1f309aDC325306 10800 0x0000000000000000000000000000000000000000 604800
 ```
 
 After deploying, point `evm_directory_subgraph` at the new `Escrow` address and its deployment block.

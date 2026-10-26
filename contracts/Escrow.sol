@@ -17,6 +17,8 @@ import {AggregatorV3Interface} from "./interfaces/AggregatorV3Interface.sol";
 ///    returned).
 ///  - Accepted offers end with `completeSale` (buyer or arbiter; funds go to the
 ///    seller) or `refund` (seller or arbiter; funds go back to the buyer).
+///  - If neither happens within `settlementPeriod` of acceptance, anyone can call
+///    `expireOffer` and the buyer is refunded.
 contract Escrow {
     enum Side {
         Sell,
@@ -29,7 +31,8 @@ contract Escrow {
         Accepted,
         Cancelled,
         Completed,
-        Refunded
+        Refunded,
+        Expired
     }
 
     struct Offer {
@@ -39,6 +42,7 @@ contract Escrow {
         Side side;
         Status status;
         uint64 createdAt;
+        uint64 acceptedAt; // zero until accepted
         uint256 amount; // wei
         uint256 usdValue; // USD with 18 decimals, at creation
     }
@@ -48,6 +52,8 @@ contract Escrow {
     uint256 public immutable maxPriceAge;
     /// @notice Optional dispute resolver; address(0) disables arbitration.
     address public immutable arbiter;
+    /// @notice Seconds after acceptance before an unsettled offer can be expired and the buyer refunded.
+    uint256 public immutable settlementPeriod;
 
     uint256 public offerCount;
     mapping(uint256 offerId => Offer) private _offers;
@@ -69,6 +75,7 @@ contract Escrow {
         uint256 indexed offerId, address indexed seller, address indexed buyer, uint256 amount, uint256 usdValue
     );
     event Refunded(uint256 indexed offerId, address indexed buyer, address indexed refundedBy, uint256 amount);
+    event OfferExpired(uint256 indexed offerId, address indexed buyer, address indexed expiredBy, uint256 amount);
 
     error InvalidAmount();
     error InvalidCounterparty();
@@ -81,6 +88,8 @@ contract Escrow {
     error InvalidPrice(int256 answer);
     error TransferFailed();
     error Reentrancy();
+    error InvalidSettlementPeriod();
+    error SettlementPeriodActive(uint256 offerId, uint256 expiresAt);
 
     modifier nonReentrant() {
         if (_locked != 1) revert Reentrancy();
@@ -89,8 +98,10 @@ contract Escrow {
         _locked = 1;
     }
 
-    constructor(address priceFeed_, uint256 maxPriceAge_, address arbiter_) {
+    constructor(address priceFeed_, uint256 maxPriceAge_, address arbiter_, uint256 settlementPeriod_) {
         if (priceFeed_ == address(0) || maxPriceAge_ == 0) revert InvalidPriceFeed();
+        if (settlementPeriod_ == 0) revert InvalidSettlementPeriod();
+        settlementPeriod = settlementPeriod_;
         priceFeed = AggregatorV3Interface(priceFeed_);
         maxPriceAge = maxPriceAge_;
         arbiter = arbiter_;
@@ -153,6 +164,7 @@ contract Escrow {
             o.seller = msg.sender;
         }
         o.status = Status.Accepted;
+        o.acceptedAt = uint64(block.timestamp);
 
         emit OfferAccepted(offerId, o.seller, o.buyer, o.amount);
     }
@@ -194,12 +206,32 @@ contract Escrow {
         _send(o.buyer, o.amount);
     }
 
+    /// @notice Refund the buyer of an accepted offer that was not settled within
+    /// `settlementPeriod`. Callable by anyone, so funds can never be stuck.
+    function expireOffer(uint256 offerId) public nonReentrant {
+        Offer storage o = _getOffer(offerId);
+        _requireStatus(offerId, o, Status.Accepted);
+        uint256 expiresAt = uint256(o.acceptedAt) + settlementPeriod;
+        if (block.timestamp < expiresAt) revert SettlementPeriodActive(offerId, expiresAt);
+
+        o.status = Status.Expired;
+        emit OfferExpired(offerId, o.buyer, msg.sender, o.amount);
+
+        _send(o.buyer, o.amount);
+    }
+
     // ---------------------------------------------------------------------
     // Views
     // ---------------------------------------------------------------------
 
     function getOffer(uint256 offerId) external view returns (Offer memory) {
         return _getOffer(offerId);
+    }
+
+    /// @notice True when `offerId` is accepted and its settlement period has passed.
+    function isExpired(uint256 offerId) public view returns (bool) {
+        Offer storage o = _offers[offerId];
+        return o.status == Status.Accepted && block.timestamp >= uint256(o.acceptedAt) + settlementPeriod;
     }
 
     /// @notice Latest ETH/USD price from the feed, reverting if stale or invalid.

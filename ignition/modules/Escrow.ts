@@ -14,13 +14,15 @@ export const SEPOLIA_ETH_USD_FEED = "0x694AA1769357215DE4FAC081bf1f309aDC325306"
  *  - priceFeed:   feed proxy address (defaults to the Sepolia ETH/USD feed)
  *  - maxPriceAge: seconds before a feed answer is treated as stale (default 3h)
  *  - arbiter:     optional dispute resolver, zero address to disable
+ *  - settlementPeriod: seconds after acceptance before anyone can expire an unsettled offer (default 7 days)
  */
 export default buildModule("EscrowModule", (m) => {
     const priceFeed = m.getParameter("priceFeed", SEPOLIA_ETH_USD_FEED)
     const maxPriceAge = m.getParameter("maxPriceAge", 10_800n)
     const arbiter = m.getParameter("arbiter", "0x0000000000000000000000000000000000000000")
 
-    const escrow = m.contract("Escrow", [priceFeed, maxPriceAge, arbiter])
+    const settlementPeriod = m.getParameter("settlementPeriod", 604_800n)
+    const escrow = m.contract("Escrow", [priceFeed, maxPriceAge, arbiter, settlementPeriod])
 
     return { escrow }
 })

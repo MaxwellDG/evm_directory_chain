@@ -10,7 +10,8 @@ export default buildModule("EscrowLocalModule", (m) => {
     const arbiter = m.getParameter("arbiter", "0x0000000000000000000000000000000000000000")
 
     const priceFeed = m.contract("MockV3Aggregator", [8, initialPrice])
-    const escrow = m.contract("Escrow", [priceFeed, maxPriceAge, arbiter])
+    const settlementPeriod = m.getParameter("settlementPeriod", 604_800n)
+    const escrow = m.contract("Escrow", [priceFeed, maxPriceAge, arbiter, settlementPeriod])
 
     return { priceFeed, escrow }
 })
