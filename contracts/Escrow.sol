@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import {AggregatorV3Interface} from "./interfaces/AggregatorV3Interface.sol";
+import {AutomationCompatibleInterface} from "./interfaces/AutomationCompatibleInterface.sol";
 
 /// @title Escrow
 /// @notice ETH escrow for buyer/seller offers. The USD value of every offer is
@@ -18,8 +19,9 @@ import {AggregatorV3Interface} from "./interfaces/AggregatorV3Interface.sol";
 ///  - Accepted offers end with `completeSale` (buyer or arbiter; funds go to the
 ///    seller) or `refund` (seller or arbiter; funds go back to the buyer).
 ///  - If neither happens within `settlementPeriod` of acceptance, anyone can call
-///    `expireOffer` and the buyer is refunded.
-contract Escrow {
+///    `expireOffer` and the buyer is refunded. A Chainlink Automation upkeep can
+///    do this automatically via `checkUpkeep` / `performUpkeep`.
+contract Escrow is AutomationCompatibleInterface {
     enum Side {
         Sell,
         Buy
@@ -57,6 +59,11 @@ contract Escrow {
 
     uint256 public offerCount;
     mapping(uint256 offerId => Offer) private _offers;
+
+    /// @notice Max offers expired in one `performUpkeep` call.
+    uint256 public constant MAX_UPKEEP_BATCH = 20;
+    /// @notice Max offer ids scanned by one `checkUpkeep` call.
+    uint256 public constant MAX_UPKEEP_SCAN = 500;
 
     uint256 private _locked = 1;
 
@@ -208,7 +215,53 @@ contract Escrow {
 
     /// @notice Refund the buyer of an accepted offer that was not settled within
     /// `settlementPeriod`. Callable by anyone, so funds can never be stuck.
-    function expireOffer(uint256 offerId) public nonReentrant {
+    function expireOffer(uint256 offerId) external nonReentrant {
+        _expire(offerId);
+    }
+
+    // ---------------------------------------------------------------------
+    // Chainlink Automation
+    // ---------------------------------------------------------------------
+
+    /// @notice Off-chain simulated by Chainlink Automation. Scans offer ids for
+    /// expired escrows and returns up to MAX_UPKEEP_BATCH of them.
+    /// @param checkData Empty to scan from id 1, or `abi.encode(uint256 startId)`.
+    /// At most MAX_UPKEEP_SCAN ids are scanned per call.
+    function checkUpkeep(bytes calldata checkData)
+        external
+        view
+        override
+        returns (bool upkeepNeeded, bytes memory performData)
+    {
+        uint256 start = checkData.length == 0 ? 1 : abi.decode(checkData, (uint256));
+        if (start == 0) start = 1;
+        uint256 end = offerCount;
+        if (end >= start + MAX_UPKEEP_SCAN) end = start + MAX_UPKEEP_SCAN - 1;
+
+        uint256[] memory ids = new uint256[](MAX_UPKEEP_BATCH);
+        uint256 n;
+        for (uint256 id = start; id <= end && n < MAX_UPKEEP_BATCH; ++id) {
+            if (isExpired(id)) ids[n++] = id;
+        }
+        assembly {
+            mstore(ids, n)
+        }
+        upkeepNeeded = n > 0;
+        performData = abi.encode(ids);
+    }
+
+    /// @notice Expires the offers listed in `performData` (`abi.encode(uint256[])`).
+    /// Ids that are no longer expired are skipped, so stale or duplicate
+    /// performData is harmless. Callable by anyone, as `expireOffer` is.
+    function performUpkeep(bytes calldata performData) external override nonReentrant {
+        uint256[] memory ids = abi.decode(performData, (uint256[]));
+        uint256 len = ids.length > MAX_UPKEEP_BATCH ? MAX_UPKEEP_BATCH : ids.length;
+        for (uint256 i; i < len; ++i) {
+            if (isExpired(ids[i])) _expire(ids[i]);
+        }
+    }
+
+    function _expire(uint256 offerId) private {
         Offer storage o = _getOffer(offerId);
         _requireStatus(offerId, o, Status.Accepted);
         uint256 expiresAt = uint256(o.acceptedAt) + settlementPeriod;

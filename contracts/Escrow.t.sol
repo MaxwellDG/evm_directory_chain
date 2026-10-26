@@ -401,6 +401,66 @@ contract EscrowTest is Test {
         escrow.expireOffer(id);
     }
 
+    // ------------------------------------------------------------------ automation
+
+    function test_CheckUpkeepFalseWhenNothingExpired() public {
+        _acceptedListing(1 ether);
+        (bool needed, bytes memory data) = escrow.checkUpkeep("");
+        assertFalse(needed);
+        assertEq(abi.decode(data, (uint256[])).length, 0);
+    }
+
+    function test_UpkeepExpiresOnlyExpiredOffers() public {
+        uint256 a = _acceptedListing(1 ether);
+        vm.warp(block.timestamp + 1 days);
+        feed.updateAnswer(PRICE); // keep the price fresh
+        uint256 b = _acceptedListing(2 ether);
+        vm.prank(seller);
+        escrow.createOffer(Escrow.Side.Sell, address(0), 1 ether); // open, never expires
+        vm.warp(block.timestamp + SETTLE - 1 days); // only `a` has expired
+
+        (bool needed, bytes memory data) = escrow.checkUpkeep("");
+        assertTrue(needed);
+        uint256[] memory ids = abi.decode(data, (uint256[]));
+        assertEq(ids.length, 1);
+        assertEq(ids[0], a);
+
+        vm.prank(stranger);
+        escrow.performUpkeep(data);
+        assertEq(uint8(escrow.getOffer(a).status), uint8(Escrow.Status.Expired));
+        assertEq(uint8(escrow.getOffer(b).status), uint8(Escrow.Status.Accepted));
+
+        // Replaying the same performData is a no-op.
+        escrow.performUpkeep(data);
+        (needed,) = escrow.checkUpkeep("");
+        assertFalse(needed);
+    }
+
+    function test_PerformUpkeepSkipsNonExpiredIds() public {
+        uint256 a = _acceptedListing(1 ether);
+        uint256[] memory ids = new uint256[](2);
+        ids[0] = a;
+        ids[1] = 999;
+        escrow.performUpkeep(abi.encode(ids));
+        assertEq(uint8(escrow.getOffer(a).status), uint8(Escrow.Status.Accepted));
+    }
+
+    function test_CheckUpkeepRespectsStartIdAndBatchLimit() public {
+        uint256 total = escrow.MAX_UPKEEP_BATCH() + 5;
+        for (uint256 i; i < total; ++i) _acceptedListing(1 ether);
+        vm.warp(block.timestamp + SETTLE);
+
+        (, bytes memory data) = escrow.checkUpkeep("");
+        uint256[] memory ids = abi.decode(data, (uint256[]));
+        assertEq(ids.length, escrow.MAX_UPKEEP_BATCH());
+        assertEq(ids[0], 1);
+
+        (, data) = escrow.checkUpkeep(abi.encode(uint256(21)));
+        ids = abi.decode(data, (uint256[]));
+        assertEq(ids.length, 5);
+        assertEq(ids[0], 21);
+    }
+
     // ------------------------------------------------------------------ fuzz
 
     function testFuzz_UsdValueMatchesFeed(uint96 amount, uint64 price) public {

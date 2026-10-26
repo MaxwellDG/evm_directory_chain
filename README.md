@@ -17,6 +17,7 @@ Built with [Hardhat 3](https://hardhat.org/docs/getting-started) (mocha + ethers
 | ------------------------------------------ | -------------------------------------------------------------- |
 | `contracts/Escrow.sol`                     | The escrow contract                                            |
 | `contracts/interfaces/AggregatorV3Interface.sol` | Minimal copy of Chainlink's feed interface               |
+| `contracts/interfaces/AutomationCompatibleInterface.sol` | Minimal copy of Chainlink Automation's upkeep interface |
 | `contracts/mocks/MockV3Aggregator.sol`     | Mock feed for tests and local deployments only                 |
 | `contracts/Escrow.t.sol`                   | Foundry-style Solidity tests                                   |
 | `test/Escrow.ts`                           | mocha + ethers tests                                           |
@@ -44,6 +45,20 @@ Statuses: `Open` → `Accepted` → `Completed`, `Refunded` or `Expired`; `Open`
 
 `settlementPeriod` (constructor argument, default 7 days in the Ignition modules) guarantees escrowed ETH
 is never stuck: if an accepted offer is not settled in time, anyone can expire it and refund the buyer.
+
+### Chainlink Automation
+
+`Escrow` implements Chainlink Automation's `AutomationCompatibleInterface`, so expiry can run unattended:
+
+- `checkUpkeep(checkData)` scans up to 500 offer ids (from 1, or from `abi.encode(uint256 startId)`) and
+  returns up to 20 expired ids as `abi.encode(uint256[])`.
+- `performUpkeep(performData)` expires each listed offer that is still expired and skips the rest, so stale
+  or replayed data is harmless. It is permissionless, like `expireOffer`.
+
+To automate it on Sepolia, register a custom-logic upkeep for the deployed `Escrow` address at
+[automation.chain.link](https://automation.chain.link/sepolia) and fund it with Sepolia LINK.
+If a buyer's address rejects ETH, that offer's expiry reverts the batch; call `expireOffer` for the
+other ids in that case.
 
 The `arbiter` is an optional dispute resolver set at deployment (`address(0)` disables it). Without an
 arbiter, an accepted offer can only be settled by the buyer releasing funds or the seller refunding.
