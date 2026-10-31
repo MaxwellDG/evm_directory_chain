@@ -24,6 +24,14 @@ export default defineConfig({
             type: "edr-simulated",
             chainType: "l1",
         },
+        // Local dev chain for `pnpm node:local`: starts 60 days in the past so seeded
+        // activity (scripts/seed-local.ts) ends near the real current date.
+        localDev: {
+            type: "edr-simulated",
+            chainType: "l1",
+            chainId: 31337,
+            initialDate: new Date(Date.now() - 60 * 86_400_000),
+        },
         hardhatOp: {
             type: "edr-simulated",
             chainType: "op",
