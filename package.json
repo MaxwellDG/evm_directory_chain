@@ -2,6 +2,11 @@
   "name": "chain",
   "version": "1.0.0",
   "type": "module",
+  "scripts": {
+    "node:local": "hardhat node --network localDev",
+    "deploy:local": "hardhat ignition deploy ignition/modules/EscrowLocal.ts --network localhost",
+    "seed:local": "hardhat run scripts/seed-local.ts --network localhost"
+  },
   "devDependencies": {
     "@nomicfoundation/hardhat-ethers": "^4.0.4",
     "@nomicfoundation/hardhat-ignition": "^3.0.7",
